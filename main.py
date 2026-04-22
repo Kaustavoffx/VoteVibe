@@ -9,6 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from dotenv import load_dotenv
 
 # Configure logging
 logging.basicConfig(
@@ -88,7 +89,6 @@ async def security_headers_middleware(request: Request, call_next) -> Response:
 
 # --- Google GenAI SDK Initialization ---
 # Load variables from the .env file
-from dotenv import load_dotenv
 load_dotenv()
 
 # THE FIX: Delete the rogue variable from the environment if it exists
