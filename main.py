@@ -104,9 +104,9 @@ class TimelineRequest(BaseModel):
     zip_code: str = Field(
         ...,
         min_length=5,
-        max_length=10,
-        description="The user's ZIP code (e.g., '12345' or '12345-6789').",
-        pattern=r"^\d{5}(-\d{4})?$"
+        max_length=6,
+        description="The user's ZIP or PIN code (e.g., '12345' or '110001').",
+        pattern=r"^[0-9]{5,6}$"
     )
     query: str = Field(
         ...,
