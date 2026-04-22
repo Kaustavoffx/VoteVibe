@@ -8,7 +8,7 @@ client = TestClient(app)
 def test_read_root():
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "message": "VoteVibe Enterprise Backend is running."}
+    assert "text/html" in response.headers["content-type"]
 
 
 def test_election_timeline_validation_error_empty_payload():

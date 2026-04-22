@@ -1,7 +1,9 @@
+import os
 import json
 import logging
 from typing import Any, Dict
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -171,6 +173,12 @@ async def get_election_timeline(request_data: TimelineRequest) -> Dict[str, Any]
 
 
 @app.get("/")
-async def root() -> Dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "ok", "message": "VoteVibe Enterprise Backend is running."}
+async def serve_index():
+    """Serves the frontend HTML using an absolute path."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "index.html")
+
+    if not os.path.exists(file_path):
+        return {"error": "index.html not found in the root directory"}
+
+    return FileResponse(file_path)
