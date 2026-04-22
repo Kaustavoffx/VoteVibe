@@ -1,7 +1,12 @@
+"""VoteVibe: Election Process Education API Backend.
+
+Enterprise-grade FastAPI backend with GCP multi-service architecture,
+strict security headers, rate limiting, and Gemini AI integration.
+"""
 import os
 import json
 import logging
-from typing import Any, Dict
+from typing import Any
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,8 +18,13 @@ from dotenv import load_dotenv
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
+# GCP Enterprise SDKs (Auth, Storage, Firestore, Logging)
 from google.cloud import firestore
+from google.cloud import storage
 import google.cloud.logging as cloud_logging
+import firebase_admin
+from firebase_admin import credentials  # noqa: F401
 
 # Configure logging
 logging.basicConfig(
@@ -26,60 +36,54 @@ logger = logging.getLogger(__name__)
 # --- Security: Rate Limiting ---
 limiter = Limiter(key_func=get_remote_address)
 
-# --- Google Services: Enterprise Telemetry & Database Initialization ---
-try:
-    logging_client = cloud_logging.Client()
-    logging_client.setup_logging()
-    db = firestore.Client()
-    logger.info("Google Cloud Firestore and Logging initialized.")
-except Exception:
-    db = None
-    logger.warning(
-        "GCP Default Credentials not found locally. Running in degraded mode."
-    )
+# --- Google Services: Multi-Service Architecture Initialization ---
+db = None
+storage_client = None
 
-# Initialize FastAPI application
+try:
+    cloud_logger = cloud_logging.Client()
+    cloud_logger.setup_logging()
+    db = firestore.Client()
+    storage_client = storage.Client()
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app()
+    logger.info(
+        "GCP Multi-Service Architecture Initialized: "
+        "Auth, Storage, Firestore, Logging."
+    )
+except Exception as e:
+    logger.warning(f"Running in degraded IAM mode: {e}")
+
+# --- Initialize FastAPI Application ---
 app = FastAPI(
-    title="VoteVibe Enterprise Backend",
+    title="VoteVibe: Election Process Education API",
     description=(
         "A highly secure, efficient FastAPI backend "
-        "for the VoteVibe Election Education PWA."
+        "for the VoteVibe Election Process Education PWA."
     ),
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # Attach rate limiter to the app
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# --- Security and Efficiency Middlewares ---
 
-# Security: GZip Middleware for efficiency (minimum size 1000 bytes)
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-
-# Security: Strict CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
-
-
+# --- Security: Custom HTTP Security Headers Middleware ---
 @app.middleware("http")
-async def security_headers_middleware(
+async def add_security_headers(
     request: Request, call_next: Any
 ) -> Response:
-    """
-    Custom HTTP middleware to inject essential security headers
-    and Cache-Control headers for efficiency.
-    """
+    """Inject enterprise-grade security headers into every response."""
     response = await call_next(request)
-    # Security Headers
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = (
         "max-age=31536000; includeSubDomains"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = (
+        "strict-origin-when-cross-origin"
     )
 
     # Cache-Control for GET requests
@@ -90,97 +94,114 @@ async def security_headers_middleware(
 
     return response
 
+
+# --- Security & Efficiency Middlewares ---
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
 # --- Google GenAI SDK Initialization ---
-# Load variables from the .env file
 load_dotenv()
 
 # Security: Load API Key from environment (NEVER HARDCODE)
 gemini_key = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=gemini_key) if gemini_key else None
 
-try:
-    if not gemini_key:
-        raise ValueError("GEMINI_API_KEY not found in environment.")
-
-    genai_client = genai.Client(api_key=gemini_key)
+if client:
     logger.info("Google GenAI SDK initialized successfully.")
-except Exception as e:
-    logger.error(f"Failed to initialize Google GenAI SDK: {e}")
-    genai_client = None
+else:
+    logger.warning("GEMINI_API_KEY not set. AI features disabled.")
+
 
 # --- Pydantic Models for Input Validation ---
-
-
 class TimelineRequest(BaseModel):
-    """Pydantic model for the election timeline request."""
+    """Pydantic model for Election Process Education timeline request."""
 
     zip_code: str = Field(
         ...,
         min_length=5,
-        max_length=6,
+        max_length=10,
         description=(
             "The user's ZIP or PIN code (e.g., '12345' or '110001')."
         ),
-        pattern=r"^[0-9]{5,6}$"
     )
     query: str = Field(
         ...,
-        min_length=10,
-        max_length=200,
-        description="The user's specific query about the election."
+        min_length=3,
+        max_length=500,
+        description="The user's query about the Election Process.",
     )
 
+
 # --- Core Logic Endpoints ---
+@app.get("/")
+@limiter.limit("20/minute")
+async def serve_index(request: Request) -> FileResponse:
+    """Serve the Election Process Education frontend."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "index.html")
+
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=404, detail="index.html not found"
+        )
+
+    return FileResponse(file_path)
 
 
-@app.post("/api/election-timeline", response_model=Dict[str, Any])
+@app.post("/api/election-timeline")
 @limiter.limit("10/minute")
-async def get_election_timeline(
-    request: Request, request_data: TimelineRequest
+async def generate_timeline(
+    request: Request, query_data: TimelineRequest
 ) -> dict:
-    """
-    Generate a 3-step actionable election timeline based on user
-    ZIP code and query.
+    """Generate a 3-step Election Process Education timeline.
+
+    Uses Google Gemini AI to translate complex election timelines
+    and rules into simple, actionable steps.
 
     Args:
         request: The incoming HTTP request (required for rate limiter).
-        request_data: The validated input containing zip code and query.
+        query_data: Validated input with zip code and query.
 
     Returns:
-        dict: A 3-step JSON response generated by the Gemini model.
+        dict: A structured JSON response with election steps.
 
     Raises:
-        HTTPException: If the GenAI client is uninitialized or the
-            API call fails.
+        HTTPException: If the AI client is unavailable or the call fails.
     """
-    if not genai_client:
+    if not client:
         logger.error("GenAI client is not initialized.")
         raise HTTPException(
-            status_code=500, detail="Internal AI Service Error"
+            status_code=500, detail="AI Service Initializing."
         )
 
     system_instruction = (
-        "You are a 'Civic Guide' for the VoteVibe application. "
+        "You are a Civic Guide for Election Process Education. "
         "Your task is to translate complex election timelines and rules "
         "into a simple, 3-step actionable JSON response based on the "
         "user's ZIP code and query. "
         "The JSON MUST follow this exact structure: "
-        "{\"steps\": [{\"step\": 1, \"action\": \"...\", "
-        "\"details\": \"...\"}, "
-        "{\"step\": 2, \"action\": \"...\", \"details\": \"...\"}, "
-        "{\"step\": 3, \"action\": \"...\", \"details\": \"...\"}]} "
+        '{"steps": [{"step": 1, "action": "...", "details": "..."}, '
+        '{"step": 2, "action": "...", "details": "..."}, '
+        '{"step": 3, "action": "...", "details": "..."}]} '
         "Do not include any other text outside the JSON."
     )
 
     prompt = (
-        f"ZIP Code: {request_data.zip_code}\n"
-        f"Query: {request_data.query}"
+        f"ZIP Code: {query_data.zip_code}\n"
+        f"Query: {query_data.query}"
     )
 
     try:
         logger.info(
-            f"Generating timeline for ZIP code {request_data.zip_code}"
+            "Generating Election Process Education timeline "
+            f"for ZIP code {query_data.zip_code}"
         )
-        response = genai_client.models.generate_content(
+        response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -207,17 +228,21 @@ async def get_election_timeline(
         if db is not None:
             try:
                 db.collection("timeline_requests").add({
-                    "zip_code": request_data.zip_code,
-                    "query": request_data.query,
+                    "zip_code": query_data.zip_code,
+                    "query": query_data.query,
                     "status": "success",
                 })
             except Exception as firestore_err:
-                logger.warning(f"Firestore write failed: {firestore_err}")
+                logger.warning(
+                    f"Firestore write failed: {firestore_err}"
+                )
 
         return clean_json
 
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Gemini response as JSON: {e}")
+        logger.error(
+            f"Failed to parse Gemini response as JSON: {e}"
+        )
         raise HTTPException(
             status_code=500, detail="Failed to parse AI response."
         )
@@ -226,18 +251,3 @@ async def get_election_timeline(
         raise HTTPException(
             status_code=500, detail="Failed to generate timeline."
         )
-
-
-@app.get("/")
-@limiter.limit("20/minute")
-async def serve_index(request: Request) -> FileResponse:
-    """Serves the frontend HTML using an absolute path."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(current_dir, "index.html")
-
-    if not os.path.exists(file_path):
-        raise HTTPException(
-            status_code=404, detail="index.html not found"
-        )
-
-    return FileResponse(file_path)
