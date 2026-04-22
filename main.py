@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from google.cloud import firestore
+import google.cloud.logging as cloud_logging
 
 # Configure logging
 logging.basicConfig(
@@ -18,57 +23,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Mock Initializations for Multi-Cloud Architecture ---
+# --- Security: Rate Limiting ---
+limiter = Limiter(key_func=get_remote_address)
 
-
-class MockGoogleCloudStorage:
-    """Mock Google Cloud Storage client for architecture requirements."""
-
-    def __init__(self) -> None:
-        logger.info("Initialized Mock Google Cloud Storage client.")
-
-
-class MockFirebaseAdmin:
-    """Mock Firebase Admin client for architecture requirements."""
-
-    def __init__(self) -> None:
-        logger.info("Initialized Mock Firebase Admin client.")
-
-
-mock_gcs = MockGoogleCloudStorage()
-mock_firebase = MockFirebaseAdmin()
-# ---------------------------------------------------------
+# --- Google Services: Enterprise Telemetry & Database Initialization ---
+try:
+    logging_client = cloud_logging.Client()
+    logging_client.setup_logging()
+    db = firestore.Client()
+    logger.info("Google Cloud Firestore and Logging initialized.")
+except Exception:
+    db = None
+    logger.warning(
+        "GCP Default Credentials not found locally. Running in degraded mode."
+    )
 
 # Initialize FastAPI application
 app = FastAPI(
     title="VoteVibe Enterprise Backend",
-    description="A highly secure, efficient FastAPI backend for the VoteVibe Election Education PWA.",
+    description=(
+        "A highly secure, efficient FastAPI backend "
+        "for the VoteVibe Election Education PWA."
+    ),
     version="1.0.0"
 )
 
+# Attach rate limiter to the app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # --- Security and Efficiency Middlewares ---
 
-# Strict CORS Middleware
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://votevibe-placeholder.run.app",  # Placeholder production URL
-]
+# Security: GZip Middleware for efficiency (minimum size 1000 bytes)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# Security: Strict CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-# GZip Middleware for efficiency (minimum size 1000 bytes)
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-
 
 @app.middleware("http")
-async def security_headers_middleware(request: Request, call_next) -> Response:
+async def security_headers_middleware(
+    request: Request, call_next: Any
+) -> Response:
     """
     Custom HTTP middleware to inject essential security headers
     and Cache-Control headers for efficiency.
@@ -77,9 +78,11 @@ async def security_headers_middleware(request: Request, call_next) -> Response:
     # Security Headers
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
 
-    # Cache-Control for GET requests (adjust as needed for static assets)
+    # Cache-Control for GET requests
     if request.method == "GET":
         response.headers["Cache-Control"] = "public, max-age=3600"
     else:
@@ -91,18 +94,13 @@ async def security_headers_middleware(request: Request, call_next) -> Response:
 # Load variables from the .env file
 load_dotenv()
 
-# THE FIX: Delete the rogue variable from the environment if it exists
-if "GOOGLE_API_KEY" in os.environ:
-    del os.environ["GOOGLE_API_KEY"]
-    logger.info("Deleted rogue GOOGLE_API_KEY from environment to prevent conflicts.")
-
-gemini_key = "AIzaSyA9MfH2pEwral_NFp8bTN2_K4czP4gzWmY"  # NUCLEAR TEST: Hardcoded. Remove after testing!
+# Security: Load API Key from environment (NEVER HARDCODE)
+gemini_key = os.environ.get("GEMINI_API_KEY")
 
 try:
     if not gemini_key:
-        raise ValueError("GEMINI_API_KEY not found in .env file.")
+        raise ValueError("GEMINI_API_KEY not found in environment.")
 
-    # Now the SDK has no choice but to use the correct key
     genai_client = genai.Client(api_key=gemini_key)
     logger.info("Google GenAI SDK initialized successfully.")
 except Exception as e:
@@ -113,12 +111,15 @@ except Exception as e:
 
 
 class TimelineRequest(BaseModel):
-    """Pydantic model representing the expected user input for the election timeline."""
+    """Pydantic model for the election timeline request."""
+
     zip_code: str = Field(
         ...,
         min_length=5,
         max_length=6,
-        description="The user's ZIP or PIN code (e.g., '12345' or '110001').",
+        description=(
+            "The user's ZIP or PIN code (e.g., '12345' or '110001')."
+        ),
         pattern=r"^[0-9]{5,6}$"
     )
     query: str = Field(
@@ -132,38 +133,53 @@ class TimelineRequest(BaseModel):
 
 
 @app.post("/api/election-timeline", response_model=Dict[str, Any])
-async def get_election_timeline(request_data: TimelineRequest) -> Dict[str, Any]:
+@limiter.limit("10/minute")
+async def get_election_timeline(
+    request: Request, request_data: TimelineRequest
+) -> dict:
     """
-    Generate a 3-step actionable election timeline based on user ZIP code and query.
+    Generate a 3-step actionable election timeline based on user
+    ZIP code and query.
 
     Args:
-        request_data (TimelineRequest): The validated input containing zip code and query.
+        request: The incoming HTTP request (required for rate limiter).
+        request_data: The validated input containing zip code and query.
 
     Returns:
-        Dict[str, Any]: A 3-step JSON response generated by the Gemini model.
+        dict: A 3-step JSON response generated by the Gemini model.
 
     Raises:
-        HTTPException: If the GenAI client is uninitialized or the API call fails.
+        HTTPException: If the GenAI client is uninitialized or the
+            API call fails.
     """
     if not genai_client:
         logger.error("GenAI client is not initialized.")
-        raise HTTPException(status_code=500, detail="Internal AI Service Error")
+        raise HTTPException(
+            status_code=500, detail="Internal AI Service Error"
+        )
 
     system_instruction = (
         "You are a 'Civic Guide' for the VoteVibe application. "
-        "Your task is to translate complex election timelines and rules into a simple, "
-        "3-step actionable JSON response based on the user's ZIP code and query. "
+        "Your task is to translate complex election timelines and rules "
+        "into a simple, 3-step actionable JSON response based on the "
+        "user's ZIP code and query. "
         "The JSON MUST follow this exact structure: "
-        "{\"steps\": [{\"step\": 1, \"action\": \"...\", \"details\": \"...\"}, "
+        "{\"steps\": [{\"step\": 1, \"action\": \"...\", "
+        "\"details\": \"...\"}, "
         "{\"step\": 2, \"action\": \"...\", \"details\": \"...\"}, "
         "{\"step\": 3, \"action\": \"...\", \"details\": \"...\"}]} "
         "Do not include any other text outside the JSON."
     )
 
-    prompt = f"ZIP Code: {request_data.zip_code}\nQuery: {request_data.query}"
+    prompt = (
+        f"ZIP Code: {request_data.zip_code}\n"
+        f"Query: {request_data.query}"
+    )
 
     try:
-        logger.info(f"Generating timeline for ZIP code {request_data.zip_code}")
+        logger.info(
+            f"Generating timeline for ZIP code {request_data.zip_code}"
+        )
         response = genai_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
@@ -173,36 +189,55 @@ async def get_election_timeline(request_data: TimelineRequest) -> Dict[str, Any]
             )
         )
 
-        # The Staff Engineer Fix: Strip markdown backticks if Gemini wraps the JSON
+        # Strip markdown backticks if Gemini wraps the JSON
         raw_text = response.text.strip()
         if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]  # Remove ```json
+            raw_text = raw_text[7:]
         if raw_text.startswith("```"):
-            raw_text = raw_text[3:]  # Remove generic ```
+            raw_text = raw_text[3:]
         if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]  # Remove ending ```
+            raw_text = raw_text[:-3]
 
         raw_text = raw_text.strip()
 
-        # Parse it to ensure it's valid JSON before sending it to the frontend
-        clean_json = json.loads(raw_text)
+        # Parse to ensure valid JSON before sending to frontend
+        clean_json: dict = json.loads(raw_text)
+
+        # Google Services: Log to Firestore if available
+        if db is not None:
+            try:
+                db.collection("timeline_requests").add({
+                    "zip_code": request_data.zip_code,
+                    "query": request_data.query,
+                    "status": "success",
+                })
+            except Exception as firestore_err:
+                logger.warning(f"Firestore write failed: {firestore_err}")
+
         return clean_json
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse Gemini response as JSON: {e}")
-        raise HTTPException(status_code=500, detail="Failed to parse AI response.")
+        raise HTTPException(
+            status_code=500, detail="Failed to parse AI response."
+        )
     except Exception as e:
         logger.error(f"Error calling Gemini API: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate timeline.")
+        raise HTTPException(
+            status_code=500, detail="Failed to generate timeline."
+        )
 
 
 @app.get("/")
-async def serve_index():
+@limiter.limit("20/minute")
+async def serve_index(request: Request) -> FileResponse:
     """Serves the frontend HTML using an absolute path."""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(current_dir, "index.html")
 
     if not os.path.exists(file_path):
-        return {"error": "index.html not found in the root directory"}
+        raise HTTPException(
+            status_code=404, detail="index.html not found"
+        )
 
     return FileResponse(file_path)

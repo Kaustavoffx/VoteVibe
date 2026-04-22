@@ -5,3 +5,8 @@ python-dotenv
 pytest
 httpx
 google-cloud-storage
+google-cloud-firestore
+google-cloud-logging
+slowapi
+pytest-cov
+mypy
