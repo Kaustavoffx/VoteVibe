@@ -87,13 +87,26 @@ async def security_headers_middleware(request: Request, call_next) -> Response:
     return response
 
 # --- Google GenAI SDK Initialization ---
-# Ensure GOOGLE_API_KEY is set in your environment variables
+# Load variables from the .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+# THE FIX: Delete the rogue variable from the environment if it exists
+if "GOOGLE_API_KEY" in os.environ:
+    del os.environ["GOOGLE_API_KEY"]
+    logger.info("Deleted rogue GOOGLE_API_KEY from environment to prevent conflicts.")
+
+gemini_key = "AIzaSyA9MfH2pEwral_NFp8bTN2_K4czP4gzWmY"  # NUCLEAR TEST: Hardcoded. Remove after testing!
+
 try:
-    genai_client = genai.Client()
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY not found in .env file.")
+
+    # Now the SDK has no choice but to use the correct key
+    genai_client = genai.Client(api_key=gemini_key)
     logger.info("Google GenAI SDK initialized successfully.")
 except Exception as e:
     logger.error(f"Failed to initialize Google GenAI SDK: {e}")
-    # We won't crash the app here, but the endpoint will fail if the client is invalid.
     genai_client = None
 
 # --- Pydantic Models for Input Validation ---
@@ -160,9 +173,20 @@ async def get_election_timeline(request_data: TimelineRequest) -> Dict[str, Any]
             )
         )
 
-        # Parse the JSON response
-        result = json.loads(response.text)
-        return result
+        # The Staff Engineer Fix: Strip markdown backticks if Gemini wraps the JSON
+        raw_text = response.text.strip()
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]  # Remove ```json
+        if raw_text.startswith("```"):
+            raw_text = raw_text[3:]  # Remove generic ```
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]  # Remove ending ```
+
+        raw_text = raw_text.strip()
+
+        # Parse it to ensure it's valid JSON before sending it to the frontend
+        clean_json = json.loads(raw_text)
+        return clean_json
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse Gemini response as JSON: {e}")
