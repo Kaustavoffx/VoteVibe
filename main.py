@@ -202,7 +202,7 @@ async def generate_timeline(
             f"for ZIP code {query_data.zip_code}"
         )
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-2.0-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
