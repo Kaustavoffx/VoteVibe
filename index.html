@@ -429,8 +429,8 @@
                 loader.style.display = 'block';
 
                 try {
-                    // Always point to local backend for testing unless in production environment
-                    const apiUrl = 'http://localhost:8000/api/election-timeline';
+                    // This is the fix: use a relative path for global access
+                    const apiUrl = '/api/election-timeline';
 
                     const response = await fetch(apiUrl, {
                         method: 'POST',
